@@ -82,3 +82,15 @@ export async function onMain(sha: string): Promise<boolean> {
     return r.status === "identical" || r.status === "ahead";
   } catch { return false; }
 }
+/** Bytes of one file on TARGET.branch, looked up by blob sha from a directory listing (cached per instance). */
+const dirCache = new Map<string, { at: number; files: Record<string, string> }>();
+const blobCache = new Map<string, Buffer>();
+export async function getDirFileBytes(dir: string, name: string): Promise<Buffer | null> {
+  let c = dirCache.get(dir);
+  if (!c || Date.now() - c.at > 5 * 60_000) { c = { at: Date.now(), files: await listDir(dir) }; dirCache.set(dir, c); }
+  const sha = c.files[name];
+  if (!sha) return null;
+  let b = blobCache.get(sha);
+  if (!b) { b = await getBlobBytes(sha); if (blobCache.size < 200) blobCache.set(sha, b); }
+  return b;
+}

@@ -59,11 +59,14 @@ const statusRoute = await import("../app/api/status/route.ts");
 const loginRoute = await import("../app/api/auth/login/route.ts");
 const previewRoute = await import("../app/api/refresh/preview/route.ts");
 const applyRoute = await import("../app/api/refresh/apply/route.ts");
+const mapRoute = await import("../app/map/route.ts");
+const imgRoute = await import("../app/src/images/[file]/route.ts");
+const logoutRoute = await import("../app/api/auth/logout/route.ts");
 const O = "https://editor.example";
 const req = (p, { method = "GET", cookie, origin, csrf, body, form, ip } = {}) => new Request(O + p, { method, headers: { ...(cookie ? { cookie } : {}), ...(origin ? { origin } : {}), ...(csrf ? { "x-csrf-token": csrf } : {}), ...(body ? { "content-type": "application/json" } : {}), ...(ip ? { "x-forwarded-for": ip } : {}) }, body: form ? new URLSearchParams(form) : body ? JSON.stringify(body) : undefined });
 
 // ---- fail closed when unconfigured ----
-for (const [name, call] of [["master", () => masterRoute.GET(req("/api/master"))], ["save", () => saveRoute.POST(req("/api/save", { method: "POST", body: {} }))], ["status", () => statusRoute.GET(req("/api/status"))], ["login", () => loginRoute.POST(req("/api/auth/login", { method: "POST", origin: O, form: { password: "x" } }))], ["refresh", () => previewRoute.POST(req("/api/refresh/preview", { method: "POST", body: {} }))]])
+for (const [name, call] of [["master", () => masterRoute.GET(req("/api/master"))], ["save", () => saveRoute.POST(req("/api/save", { method: "POST", body: {} }))], ["status", () => statusRoute.GET(req("/api/status"))], ["login", () => loginRoute.POST(req("/api/auth/login", { method: "POST", origin: O, form: { password: "x" } }))], ["refresh", () => previewRoute.POST(req("/api/refresh/preview", { method: "POST", body: {} }))], ["map", () => mapRoute.GET(req("/map"))], ["image", () => imgRoute.GET(req("/src/images/a.webp"), { params: Promise.resolve({ file: "a.webp" }) })]])
   ok((await call()).status === 503, `unconfigured: ${name} -> 503`);
 ok(!calls.length, "unconfigured: no network calls at all");
 
@@ -219,11 +222,110 @@ ok(!JSON.stringify(mj).includes(TEST_TOKEN) && !JSON.stringify(mj).includes(proc
 // ---- vendored core identical to the portfolio's ----
 ok(fs.readFileSync("lib/master-core.mjs", "utf8") === fs.readFileSync(path.join(PORTFOLIO, "scripts/master-core.mjs"), "utf8"), "lib/master-core.mjs == portfolio scripts/master-core.mjs");
 ok(fs.readFileSync("lib/master-validate.mjs", "utf8") === fs.readFileSync(path.join(PORTFOLIO, "scripts/master-validate.mjs"), "utf8"), "lib/master-validate.mjs == portfolio scripts/master-validate.mjs");
+// ---- original evidence map behind auth, with the editor overlay ----
+{
+  const MAP = fs.readFileSync(path.join(PORTFOLIO, "data/source/evidence-map/index.html"), "utf8");
+  ok(MAP === fs.readFileSync("../portfolio-evidence-map/html-package/index.html", "utf8"), "portfolio copy of the map == original html-package/index.html");
+  setFile("data/source/evidence-map/index.html", MAP);
+  const imgDir = path.join(PORTFOLIO, "data/source/evidence-map/src/images");
+  const imgName = fs.readdirSync(imgDir).find((f) => f.endsWith(".webp"));
+  const imgBytes = fs.readFileSync(path.join(imgDir, imgName));
+  const ip = `data/source/evidence-map/src/images/${imgName}`;
+  repoFiles[ip] = ""; gitSha[ip] = crypto.createHash("sha1").update(imgBytes).digest("hex"); blobs[gitSha[ip]] = imgBytes;
+
+  let r = await mapRoute.GET(req("/map"));
+  ok(r.status === 303 && r.headers.get("location") === O + "/", "signed-out /map -> redirect to login, no map content");
+  ok((await imgRoute.GET(req("/src/images/" + imgName), { params: Promise.resolve({ file: imgName }) })).status === 401, "signed-out thumbnail -> 401");
+  calls.length = 0;
+  r = await mapRoute.GET(req("/map", { cookie: ck }));
+  const html = await r.text();
+  ok(r.status === 200 && /text\/html/.test(r.headers.get("content-type")) && r.headers.get("cache-control") === "no-store", "signed-in /map -> html, no-store");
+  ok(calls.every((c) => new URL(c.url).pathname.startsWith("/repos/tangiblethinking/portforag-test/")) && calls.some((c) => c.url.includes("/contents/data/source/evidence-map/index.html")), "map read from the fixed portfolio path only");
+  const inj = html.match(/<script type="application\/json" id="editor-config">[\s\S]*?<\/script>\n<script>\n[\s\S]*?<\/script>\n(?=<\/body>)/);
+  ok(inj && html.replace(inj[0], "") === MAP, "served map == original byte-for-byte except one injected block before </body>");
+  ok(html.includes(JSON.stringify({ csrf: sess.session.csrf })) && !html.includes(TEST_TOKEN) && !html.includes(process.env.EDITOR_PASSWORD_HASH) && !html.includes(process.env.EDITOR_SESSION_SECRET), "page carries only the session CSRF token, no secrets");
+  const overlaySrc = fs.readFileSync("lib/map-overlay.js", "utf8");
+  ok(!/<\/script/i.test(overlaySrc) && !/process\.env|GITHUB_TOKEN|PASSWORD_HASH|SESSION_SECRET/.test(overlaySrc), "overlay has no </script and reads no secrets");
+  ok(JSON.parse(fs.readFileSync("next.config.mjs", "utf8").match(/"\/map": (\[[^\]]*\])/)[1]).includes("./lib/map-overlay.js"), "overlay file traced into the /map function");
+
+  const ir = await imgRoute.GET(req("/src/images/" + imgName, { cookie: ck }), { params: Promise.resolve({ file: imgName }) });
+  ok(ir.status === 200 && ir.headers.get("content-type") === "image/webp" && /private/.test(ir.headers.get("cache-control")) && Buffer.from(await ir.arrayBuffer()).equals(imgBytes), "signed-in thumbnail served from the fixed images dir");
+  for (const bad of ["../master.json", "..%2Fmaster.json", "x.png", "nope.webp", ".hidden.webp"])
+    ok((await imgRoute.GET(req("/src/images/x", { cookie: ck }), { params: Promise.resolve({ file: bad }) })).status === 404, `thumbnail name rejected: ${bad}`);
+
+  const cfg = fs.readFileSync("next.config.mjs", "utf8");
+  ok(/"Referrer-Policy", value: "strict-origin-when-cross-origin"/.test(cfg) && !/no-referrer/.test(cfg), "Referrer-Policy strict-origin-when-cross-origin (form POSTs carry a real Origin)");
+  ok(/redirect\("\/map"\)/.test(fs.readFileSync("app/page.tsx", "utf8")), "signed-in root goes to the map");
+  // Origin rules unchanged: null / missing Origin still refused on login.
+  ok((await loginRoute.POST(new Request(O + "/api/auth/login", { method: "POST", headers: { origin: "null" }, body: new URLSearchParams({ password: TEST_PASSWORD }) }))).status === 403, "Origin: null still refused");
+
+  // ---- overlay binding in a DOM (jsdom) against the real route handlers + mocked GitHub ----
+  const { JSDOM, VirtualConsole } = await import("jsdom");
+  const saves = [];
+  const bridge = async (url, init = {}) => {
+    const u = new URL(String(url), O + "/map"); const m = (init.method || "GET").toUpperCase();
+    const rq = new Request(u, { method: m, headers: { ...(init.headers || {}), cookie: ck, ...(m !== "GET" ? { origin: O } : {}) }, body: init.body });
+    if (u.pathname === "/api/master") return masterRoute.GET(rq);
+    if (u.pathname === "/api/save") { saves.push(JSON.parse(init.body)); return saveRoute.POST(rq); }
+    if (u.pathname === "/api/auth/logout") return logoutRoute.POST(rq);
+    return new Response("{}", { status: 404 });
+  };
+  const errors = []; const vc = new VirtualConsole(); vc.on("jsdomError", (e) => errors.push(String(e)));
+  const before = JSON.parse(repoFiles["data/master.json"]);
+  const dom = new JSDOM(html, { url: O + "/map", runScripts: "dangerously", pretendToBeVisual: true, virtualConsole: vc, beforeParse(w) { w.fetch = bridge; } });
+  const { window: w } = dom; const d = w.document;
+  const until = async (f, ms = 3000) => { const t = Date.now(); while (!f()) { if (Date.now() - t > ms) return false; await new Promise((res) => setTimeout(res, 10)); } return true; };
+  ok(await until(() => /records indexable/.test(d.querySelector(".ed-sum")?.textContent || "")), "overlay loads the canonical master");
+  ok(!errors.length, "no script errors in the map + overlay: " + errors.slice(0, 2).join(" | "));
+  ok(d.querySelectorAll("nav.toc li").length === 10 && d.querySelectorAll("main section").length >= 10, "all original map sections render (10 TOC entries)");
+  const ths = [...d.querySelectorAll("#inventory thead th")].map((t) => t.textContent);
+  const rows = [...d.querySelectorAll("#inventory tbody tr[data-repo-id]")];
+  ok(ths[0] === "Indexable" && rows.length === 86 && rows.every((tr) => tr.firstChild.querySelector("input[data-ed-id]")?.getAttribute("data-ed-id") === tr.getAttribute("data-repo-id")), "Indexable toggle on all 86 inventory rows, bound to the row's stable id");
+  const plain = new JSDOM(MAP, { url: O + "/map", runScripts: "dangerously", pretendToBeVisual: true });
+  const origThs = [...plain.window.document.querySelectorAll("#inventory thead th")].map((t) => t.textContent);
+  const origDetail = plain.window.document.getElementById("detail").textContent;
+  plain.window.close();
+  ok(origThs.length > 3 && ths.slice(1).join("|") === origThs.join("|"), "original inventory columns kept, in order, after the toggle column");
+  ok(d.getElementById("detail").textContent.endsWith(origDetail), "original repository detail content kept in full below the toggle");
+  ok(rows.every((tr) => { const id = tr.getAttribute("data-repo-id"); const rec = before.records.find((x) => x.id === id); return tr.firstChild.querySelector("input").checked === rec.indexable && !tr.firstChild.querySelector("input").disabled; }), "toggle states match master.indexable");
+  const resumeCb = d.querySelector('.ed-bar input[data-ed-id="resume"]');
+  ok(resumeCb && resumeCb.checked === before.records.find((x) => x.id === "resume").indexable, "resume record (no map row) has its own toggle");
+  const det = d.querySelector("#detail .ed-detail input[data-ed-id]");
+  const selName = d.getElementById("detail-select").value;
+  ok(det && det.getAttribute("data-ed-id") === DATA_ID(selName), "repository detail shows the toggle for the selected record");
+  function DATA_ID(n) { return JSON.parse(MAP.match(/<script type="application\/json" id="evidence-data">([\s\S]*?)<\/script>/)[1]).rows.find((r) => r.n === n)?.id; }
+  const recRow = rows.find((tr) => before.records.find((x) => x.id === tr.getAttribute("data-repo-id")).indexable && before.records.find((x) => x.id === tr.getAttribute("data-repo-id")).recommendation === "Feature") || rows[0];
+  const X = recRow.getAttribute("data-repo-id");
+  const cbX = () => d.querySelector(`#inventory input[data-ed-id="${X}"]`);
+  cbX().click();
+  const saveBtn = [...d.querySelectorAll(".ed-bar button")].find((b) => /^Save/.test(b.textContent));
+  ok(/1 unsaved/.test(d.querySelector(".ed-sum").textContent) && !saveBtn.disabled && d.querySelector(`#inventory tr[data-repo-id="${X}"]`).classList.contains("ed-off"), "toggle off marks 1 unsaved, enables Save, dims the row");
+  cbX().click();
+  ok(!/unsaved/.test(d.querySelector(".ed-sum").textContent) && saveBtn.disabled, "toggling back clears the change");
+  cbX().click();
+  // filters re-render the inventory: toggles are re-attached with the pending state
+  const q = d.querySelector('#inventory')?.closest("section").querySelector('input:not([type])') || d.querySelector('section input[type="search"], section input[type="text"]');
+  const xName = JSON.parse(MAP.match(/<script type="application\/json" id="evidence-data">([\s\S]*?)<\/script>/)[1]).rows.find((r) => r.id === X).n;
+  q.value = xName; q.dispatchEvent(new w.Event("input"));
+  await until(() => d.querySelectorAll("#inventory tbody tr").length < 86);
+  ok(cbX() && cbX().checked === false && d.querySelector("#detail .ed-detail input")?.getAttribute("data-ed-id") === X, "after filtering, inventory + detail toggles re-attach with the unsaved state");
+  saveBtn.click();
+  ok(await until(() => /Saved 1 change/.test(d.querySelector(".ed-msg").textContent)), "Save posts and reports the commit");
+  ok(saves.length === 1 && JSON.stringify(saves[0].changes) === JSON.stringify({ [X]: { indexable: false } }) && saves[0].base_sha === blobSha(JSON.stringify(before, null, 2) + "\n"), "Save body = { base_sha, changes: { id: { indexable } } } only");
+  const after = JSON.parse(repoFiles["data/master.json"]);
+  const diff = after.records.filter((r, i) => JSON.stringify(r) !== JSON.stringify(before.records[i])).map((r) => r.id);
+  const ax = after.records.find((r) => r.id === X), bx = before.records.find((r) => r.id === X);
+  ok(diff.length === 1 && diff[0] === X && ax.indexable === false && JSON.stringify({ ...ax, indexable: true }) === JSON.stringify({ ...bx, indexable: true }), "only that record's indexable changed; ids, classifications, manual corrections untouched");
+  ok(ax.recommendation === bx.recommendation, "Feature/recommendation independent of the toggle");
+  ok(!d.documentElement.outerHTML.includes(TEST_TOKEN), "no token in the DOM");
+  w.close();
+}
+
 // ---- no secrets/credentials in client code ----
-const client = fs.readFileSync("components/Editor.tsx", "utf8");
-ok(!/process\.env|GITHUB_TOKEN|PASSWORD_HASH|SESSION_SECRET/.test(client), "client component reads no secrets");
+ok(!fs.existsSync("components/Editor.tsx"), "simplified table editor removed");
 ok(!fs.existsSync("github-app-manifest.json") && !fs.existsSync("app/api/auth/callback") && !/installation|appJwt|oauth/i.test(fs.readFileSync("lib/github.ts", "utf8")), "GitHub App / OAuth code removed");
 ok(!fs.readdirSync("app/api", { recursive: true }).some((f) => /demo|public/.test(String(f))), "no demo/public write endpoints");
+ok(!fs.existsSync("public") || !fs.readdirSync("public", { recursive: true }).length, "no public static assets (map + thumbnails only via signed-in routes)");
 
 console.log(`editor tests: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

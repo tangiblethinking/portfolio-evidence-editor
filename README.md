@@ -4,17 +4,20 @@ Private, protected editor for the ONE canonical portfolio master: `tangiblethink
 The editor keeps no copy: every read fetches that file server-side, every save commits it directly to `main` (no PR).
 
 ## What it does
-- Evidence-map style table (adapted from the evidence-map HTML styles) with search and filters (family, recommendation,
-  employer status, indexable, conflicts/corrections), per-record **Indexable** toggle and verified corrections for
-  `title`, `description`, `skills`, `keywords`, `dates`, `employer` (stored in `record.manual`, source value kept in
-  `record.source_values`, revertible). “Feature” is shown as a label only.
+- **Interface = the original evidence map.** After sign-in, `/map` serves the portfolio repo's
+  `data/source/evidence-map/index.html` (identical to the original evidence-map package) unchanged: all sections,
+  filters, column views, full repository detail and thumbnails (`/src/images/*.webp`, read from
+  `data/source/evidence-map/src/images`). Both routes require a session. One injected overlay (`lib/map-overlay.js`)
+  adds an **Indexable** toggle per canonical record (inventory rows, repository detail, and a bar toggle for records
+  without a map row, e.g. `resume`) and one **Save** bar. The page's facts are not rewritten; the detail toggle notes
+  the master's current indexable state and any manual corrections stored in the master. “Feature” is untouched.
 - **Save**: `POST /api/save {base_sha, changes}` → re-reads the file, 409 if its blob sha moved (lists records changed
   meanwhile), validates (same validator as the portfolio: ids, count, fields, editable keys only), commits with the
   Contents API using `sha=base_sha`. Repo, branch and path are constants (`lib/config.ts`); requests cannot choose them.
-- **Statuses, separately**: save (commit on main) · index (production `GET /api/version` reports this commit AND a
+- **Statuses, separately** (API `GET /api/status`, no panel): save (commit on main) · index (production `GET /api/version` reports this commit AND a
   build-time retrieval index whose master hash equals the saved file) · deployment (GitHub commit statuses, Vercel).
   Nothing is shown as done unless observed.
-- **Source refresh (manual only)**: upload a newer evidence-map `index.html` → preview → apply. Uses `lib/master-core.mjs`,
+- **Source refresh (manual only, API `/api/refresh/preview|apply`, no panel)**: post a newer evidence-map `index.html` → preview → apply. Uses `lib/master-core.mjs`,
   which must be byte-identical to the portfolio's `scripts/master-core.mjs` (checked against GitHub before each
   preview/apply), so output equals `npm run build:master`. Toggles and corrections carry over. Image files must already
   be in the repo; missing ones are flagged, never fetched. One commit: source HTML + master + `public/evidence` changes.
@@ -29,7 +32,7 @@ The editor keeps no copy: every read fetches that file server-side, every save c
 - Repo access: server-only fine-grained personal access token (`EDITOR_GITHUB_TOKEN`, must start `github_pat_`), used only
   for `tangiblethinking/portforag-test` (paths fixed in code). Never sent to the browser or logged. Fails closed (login page
   shows "not configured") until all settings are valid. Headers: CSP (frame-ancestors none), X-Frame-Options DENY,
-  noindex, no-referrer, HSTS.
+  noindex, Referrer-Policy strict-origin-when-cross-origin (so form POSTs carry a real `Origin`), HSTS.
 
 ## Setup (owner)
 1. Create a fine-grained PAT: Resource owner `tangiblethinking` → Only select repositories → `portforag-test` →
@@ -42,5 +45,5 @@ The editor keeps no copy: every read fetches that file server-side, every save c
 Public paths: `/` (login or "not configured" page) and `POST /api/auth/login`. Everything else requires a session.
 
 ## Dev
-`npm test` (mocked network: auth, CSRF, conflicts, exact file, refresh identity) · `npm run typecheck` · `npm run build`.
+`npm test` (mocked network: auth, CSRF, conflicts, exact file, refresh identity, map served byte-identical behind auth, overlay toggles/Save bound to `/api/save` in jsdom) · `npm run typecheck` · `npm run build`.
 Node 24 (tests import `.ts` with type stripping).

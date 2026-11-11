@@ -9,12 +9,12 @@ const csp = [
   "base-uri 'none'",
 ].join("; ");
 export default {
-  outputFileTracingIncludes: { "/api/refresh/preview": ["./lib/master-core.mjs", "./lib/master-validate.mjs"], "/api/refresh/apply": ["./lib/master-core.mjs", "./lib/master-validate.mjs"] },
+  outputFileTracingIncludes: { "/api/refresh/preview": ["./lib/master-core.mjs", "./lib/master-validate.mjs"], "/api/refresh/apply": ["./lib/master-core.mjs", "./lib/master-validate.mjs"], "/map": ["./lib/map-overlay.js"] },
   async headers() {
     return [{ source: "/(.*)", headers: [
       { key: "Content-Security-Policy", value: csp },
       { key: "X-Frame-Options", value: "DENY" },
-      { key: "Referrer-Policy", value: "no-referrer" },
+      { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
       { key: "X-Content-Type-Options", value: "nosniff" },
       { key: "X-Robots-Tag", value: "noindex, nofollow" },
       { key: "Strict-Transport-Security", value: "max-age=63072000" },

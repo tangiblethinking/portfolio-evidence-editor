@@ -1,5 +1,5 @@
 import { headers } from "next/headers";
-import Editor from "../components/Editor.tsx";
+import { redirect } from "next/navigation";
 import { REQUIRED_ENV, missingConfig } from "../lib/config.ts";
 import { getSession } from "../lib/session.ts";
 export const dynamic = "force-dynamic";
@@ -34,5 +34,5 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ a
       </main>
     );
   }
-  return <Editor csrf={session.csrf} />;
+  redirect("/map");
 }
