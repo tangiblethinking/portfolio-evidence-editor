@@ -24,7 +24,7 @@ export async function POST(req: Request) {
       { path: TARGET.masterPath, text: p.master_text },
       ...p.image_adds.map((i) => ({ path: i.path, blob: i.blob })),
       ...p.image_deletes.map((d) => ({ path: d, blob: null })),
-    ], `Evidence editor: source refresh (${p.summary.records} records, ${p.summary.carried_over.length} carried selections/corrections) by ${a.session.login}`);
+    ], `Evidence editor: source refresh (${p.summary.records} records, ${p.summary.carried_over.length} carried selections/corrections)`);
     return json(200, { commit, master_sha256: p.master_sha256, summary: p.summary });
   } catch (e: any) {
     if (e instanceof GitHubError && (e.status === 409 || e.status === 422)) return json(409, { error: "conflict", message: "main moved during apply; preview again" });

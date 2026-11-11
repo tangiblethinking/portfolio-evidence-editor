@@ -9,7 +9,7 @@ type SaveInfo = { commit: string; master_sha256: string; changed: string[] };
 type Status = { save: { state: string; commit: string }; index: { state: string; detail: string }; deployment: { state: string; detail: string; url?: string } };
 const lines = (s: string) => s.split("\n").map((x) => x.trim()).filter(Boolean);
 
-export default function Editor({ login, csrf }: { login: string; csrf: string }) {
+export default function Editor({ csrf }: { csrf: string }) {
   const [data, setData] = useState<Loaded | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [pending, setPending] = useState<Changes>({});
@@ -99,7 +99,7 @@ export default function Editor({ login, csrf }: { login: string; csrf: string })
     <main>
       <div className="bar">
         <div><h1>Portfolio evidence editor</h1><p className="summary">One master: <code>{data.path}</code> · blob {data.sha.slice(0, 7)} · {records.length} records · {records.filter((r) => r.indexable).length} indexable</p></div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}><span className="muted">{login}</span><button className="btn" onClick={logout}>Sign out</button></div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}><button className="btn" onClick={logout}>Sign out</button></div>
       </div>
 
       <div className="status">

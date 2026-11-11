@@ -1,10 +1,10 @@
-// Stateless signed sessions (HMAC-SHA256, HttpOnly, Secure, SameSite=Lax) + CSRF + same-origin checks.
+// Password sign-in (scrypt hash) + stateless signed sessions (HMAC-SHA256, HttpOnly, Secure, SameSite=Lax) + CSRF + same-origin checks.
 import crypto from "node:crypto";
-import { ALLOWED_LOGINS, SESSION_HOURS, isConfigured } from "./config.ts";
+import { PASSWORD_HASH_RE, SESSION_HOURS, isConfigured } from "./config.ts";
 
 export const SESSION_COOKIE = "__Host-pee_session";
-export const OAUTH_COOKIE = "__Host-pee_oauth";
-export type Session = { login: string; csrf: string; exp: number };
+export const SUBJECT = "owner";
+export type Session = { sub: string; csrf: string; exp: number };
 
 const b64u = (b: Buffer | string) => Buffer.from(b).toString("base64url");
 const key = () => {
@@ -38,19 +38,31 @@ export const cookie = (name: string, value: string, maxAgeSec: number) =>
   `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeSec}`;
 export const clearCookie = (name: string) => `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
 
-export function newSession(login: string): { value: string; session: Session } {
-  const session = { login, csrf: crypto.randomBytes(32).toString("base64url"), exp: Date.now() + SESSION_HOURS * 3600_000 };
+export function newSession(): { value: string; session: Session } {
+  const session = { sub: SUBJECT, csrf: crypto.randomBytes(32).toString("base64url"), exp: Date.now() + SESSION_HOURS * 3600_000 };
   return { value: sign(session), session };
 }
 export function getSession(req: Request): Session | null {
   if (!isConfigured()) return null;
   const s = unsign<Session>(readCookie(req, SESSION_COOKIE));
-  return s && (ALLOWED_LOGINS as readonly string[]).includes(s.login) ? s : null;
+  return s && s.sub === SUBJECT && typeof s.csrf === "string" ? s : null;
 }
+
+/** Constant-time check of a password against EDITOR_PASSWORD_HASH (scrypt). */
+export function verifyPassword(password: string): boolean {
+  const m = (process.env.EDITOR_PASSWORD_HASH || "").match(PASSWORD_HASH_RE);
+  if (!m || typeof password !== "string" || !password || password.length > 1024) return false;
+  const [N, r, p] = [+m[1], +m[2], +m[3]];
+  const want = Buffer.from(m[5], "base64url");
+  const got = crypto.scryptSync(password, Buffer.from(m[4], "base64url"), want.length, { N, r, p, maxmem: 256 * N * r + 1024 * 1024 });
+  return got.length === want.length && crypto.timingSafeEqual(got, want);
+}
+/** Same-origin check for state-changing requests. */
+export const sameOrigin = (req: Request) => { const o = req.headers.get("origin"); return !!o && o === new URL(req.url).origin; };
 
 const json = (status: number, body: object) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 /**
- * Gate for every API route. Fails closed: 503 when unconfigured, 401 without a valid allow-listed session, and for
+ * Gate for every API route. Fails closed: 503 when unconfigured, 401 without a valid session, and for
  * state-changing requests 403 unless the Origin is this site and x-csrf-token matches the session.
  */
 export function authorize(req: Request, opts: { mutate?: boolean } = {}): { session: Session } | { error: Response } {
@@ -58,8 +70,7 @@ export function authorize(req: Request, opts: { mutate?: boolean } = {}): { sess
   const session = getSession(req);
   if (!session) return { error: json(401, { error: "unauthorized" }) };
   if (opts.mutate) {
-    const origin = req.headers.get("origin");
-    if (!origin || origin !== new URL(req.url).origin) return { error: json(403, { error: "bad_origin" }) };
+    if (!sameOrigin(req)) return { error: json(403, { error: "bad_origin" }) };
     const t = req.headers.get("x-csrf-token") || "";
     const a = Buffer.from(t), b = Buffer.from(session.csrf);
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { error: json(403, { error: "bad_csrf" }) };

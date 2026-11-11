@@ -28,7 +28,7 @@ export async function POST(req: Request) {
     if (errors.length) return json(422, { error: "invalid", errors });
     if (!changed.length) return json(400, { error: "no_changes" });
     const text = serialize(master);
-    const msg = `Evidence editor: ${changed.length} record(s) (${changed.slice(0, 6).join(", ")}${changed.length > 6 ? ", …" : ""}) by ${a.session.login}`;
+    const msg = `Evidence editor: ${changed.length} record(s) (${changed.slice(0, 6).join(", ")}${changed.length > 6 ? ", …" : ""})`;
     const r = await putMaster(text, base, msg);
     return json(200, { commit: r.commit, sha: r.blob, master_sha256: crypto.createHash("sha256").update(text).digest("hex"), changed });
   } catch (e: any) {

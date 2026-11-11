@@ -1,15 +1,29 @@
-import crypto from "node:crypto";
-import { isConfigured } from "../../../../lib/config.ts";
-import { authorizeUrl } from "../../../../lib/github.ts";
-import { OAUTH_COOKIE, cookie, sign } from "../../../../lib/session.ts";
+import { SESSION_HOURS, isConfigured } from "../../../../lib/config.ts";
+import { SESSION_COOKIE, cookie, newSession, sameOrigin, verifyPassword } from "../../../../lib/session.ts";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-/** Starts GitHub App user sign-in with a signed, short-lived state + PKCE verifier cookie. */
-export function GET(req: Request) {
+
+// Per-instance throttle: 5 failed attempts per IP per 15 minutes (serverless instances do not share this state).
+const fails = new Map<string, number[]>();
+const WINDOW = 15 * 60_000, MAX = 5;
+const ipOf = (req: Request) => req.headers.get("x-forwarded-for")?.split(",")[0].trim() || "unknown";
+const redirect = (req: Request, q: string, setCookie?: string) => new Response(null, { status: 303, headers: { location: `${new URL(req.url).origin}/${q}`, "cache-control": "no-store", ...(setCookie ? { "set-cookie": setCookie } : {}) } });
+
+/** Password sign-in (form POST, same-origin only). Success: signed session cookie; failure: generic error. */
+export async function POST(req: Request) {
   if (!isConfigured()) return Response.json({ error: "not_configured" }, { status: 503 });
-  const origin = new URL(req.url).origin;
-  const state = crypto.randomBytes(24).toString("base64url");
-  const verifier = crypto.randomBytes(48).toString("base64url");
-  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
-  return new Response(null, { status: 302, headers: { location: authorizeUrl(origin, state, challenge), "set-cookie": cookie(OAUTH_COOKIE, sign({ state, verifier, exp: Date.now() + 600_000 }), 600), "cache-control": "no-store" } });
+  if (!sameOrigin(req)) return Response.json({ error: "bad_origin" }, { status: 403 });
+  const ip = ipOf(req), now = Date.now();
+  const recent = (fails.get(ip) || []).filter((t) => now - t < WINDOW);
+  if (recent.length >= MAX) return redirect(req, "?auth=locked");
+  let password = "";
+  try { const f = await req.formData(); const v = f.get("password"); password = typeof v === "string" ? v : ""; } catch { /* not a form */ }
+  if (!verifyPassword(password)) {
+    recent.push(now); fails.set(ip, recent);
+    await new Promise((r) => setTimeout(r, 400));
+    return redirect(req, "?auth=failed");
+  }
+  fails.delete(ip);
+  return redirect(req, "", cookie(SESSION_COOKIE, newSession().value, SESSION_HOURS * 3600));
 }
+export function GET() { return Response.json({ error: "method_not_allowed" }, { status: 405 }); }

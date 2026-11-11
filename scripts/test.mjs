@@ -10,7 +10,7 @@ const masterText = fs.readFileSync(path.join(PORTFOLIO, "data/master.json"), "ut
 const master = JSON.parse(masterText);
 const blobSha = (t) => crypto.createHash("sha1").update(`blob ${Buffer.byteLength(t)}\0`).update(t).digest("hex");
 const sha256 = (t) => crypto.createHash("sha256").update(t).digest("hex");
-const ENV = ["GITHUB_APP_CLIENT_ID", "GITHUB_APP_CLIENT_SECRET", "GITHUB_APP_PRIVATE_KEY", "EDITOR_SESSION_SECRET"];
+const ENV = ["EDITOR_GITHUB_TOKEN", "EDITOR_PASSWORD_HASH", "EDITOR_SESSION_SECRET"];
 for (const k of ENV) delete process.env[k];
 
 // ---- mock network ----
@@ -19,7 +19,7 @@ let repoFiles = {}; // path -> text
 let blobs = {}; // sha -> Buffer
 const gitSha = {}; // path -> sha for binary files
 let headSha = "a".repeat(40);
-let version = null, statuses = [], userLogin = "tangiblethinking";
+let version = null, statuses = [];
 const setFile = (p, t) => { repoFiles[p] = t; blobs[blobSha(t)] = Buffer.from(t); };
 const R = (status, body) => new Response(body === null ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 globalThis.fetch = async (url, init = {}) => {
@@ -27,11 +27,7 @@ globalThis.fetch = async (url, init = {}) => {
   calls.push({ m, url: u.toString(), body: init.body ? String(init.body) : null, auth: init.headers?.authorization });
   const P = u.pathname;
   if (u.host === "portforag-test.vercel.app" && P === "/api/version") return version ? R(200, version) : R(503, {});
-  if (u.host === "github.com" && P === "/login/oauth/access_token") return R(200, { access_token: "user-token-x" });
   if (u.host !== "api.github.com") return R(404, {});
-  if (P === "/user") return R(200, { login: userLogin });
-  if (P === "/repos/tangiblethinking/portforag-test/installation") return R(200, { id: 42 });
-  if (P === "/app/installations/42/access_tokens" && m === "POST") return R(201, { token: "inst-token", expires_at: new Date(Date.now() + 3600e3).toISOString() });
   const base = "/repos/tangiblethinking/portforag-test";
   if (!P.startsWith(base)) return R(404, {});
   const rest = P.slice(base.length);
@@ -55,39 +51,48 @@ globalThis.fetch = async (url, init = {}) => {
   return R(404, {});
 };
 
-const { authorize, newSession, SESSION_COOKIE, OAUTH_COOKIE, sign } = await import("../lib/session.ts");
+const { newSession, SESSION_COOKIE, sign } = await import("../lib/session.ts");
 const { applyChanges, serialize } = await import("../lib/edits.ts");
-const { resetTokenCache } = await import("../lib/github.ts");
 const masterRoute = await import("../app/api/master/route.ts");
 const saveRoute = await import("../app/api/save/route.ts");
 const statusRoute = await import("../app/api/status/route.ts");
 const loginRoute = await import("../app/api/auth/login/route.ts");
-const cbRoute = await import("../app/api/auth/callback/route.ts");
 const previewRoute = await import("../app/api/refresh/preview/route.ts");
 const applyRoute = await import("../app/api/refresh/apply/route.ts");
 const O = "https://editor.example";
-const req = (p, { method = "GET", cookie, origin, csrf, body } = {}) => new Request(O + p, { method, headers: { ...(cookie ? { cookie } : {}), ...(origin ? { origin } : {}), ...(csrf ? { "x-csrf-token": csrf } : {}), ...(body ? { "content-type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined });
+const req = (p, { method = "GET", cookie, origin, csrf, body, form, ip } = {}) => new Request(O + p, { method, headers: { ...(cookie ? { cookie } : {}), ...(origin ? { origin } : {}), ...(csrf ? { "x-csrf-token": csrf } : {}), ...(body ? { "content-type": "application/json" } : {}), ...(ip ? { "x-forwarded-for": ip } : {}) }, body: form ? new URLSearchParams(form) : body ? JSON.stringify(body) : undefined });
 
 // ---- fail closed when unconfigured ----
-for (const [name, call] of [["master", () => masterRoute.GET(req("/api/master"))], ["save", () => saveRoute.POST(req("/api/save", { method: "POST", body: {} }))], ["status", () => statusRoute.GET(req("/api/status"))], ["login", () => loginRoute.GET(req("/api/auth/login"))], ["refresh", () => previewRoute.POST(req("/api/refresh/preview", { method: "POST", body: {} }))]])
+for (const [name, call] of [["master", () => masterRoute.GET(req("/api/master"))], ["save", () => saveRoute.POST(req("/api/save", { method: "POST", body: {} }))], ["status", () => statusRoute.GET(req("/api/status"))], ["login", () => loginRoute.POST(req("/api/auth/login", { method: "POST", origin: O, form: { password: "x" } }))], ["refresh", () => previewRoute.POST(req("/api/refresh/preview", { method: "POST", body: {} }))]])
   ok((await call()).status === 503, `unconfigured: ${name} -> 503`);
 ok(!calls.length, "unconfigured: no network calls at all");
 
-// ---- configure (test-only key + secret) ----
-const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
-process.env.GITHUB_APP_CLIENT_ID = "Iv1.test"; process.env.GITHUB_APP_CLIENT_SECRET = "test-secret";
-process.env.GITHUB_APP_PRIVATE_KEY = privateKey.export({ type: "pkcs8", format: "pem" }).replace(/\n/g, "\\n");
+// ---- configure (test-only values) ----
+const TEST_PASSWORD = "correct horse battery staple";
+const salt = crypto.randomBytes(16);
+const key = crypto.scryptSync(TEST_PASSWORD, salt, 32, { N: 16384, r: 8, p: 1 });
+const TEST_TOKEN = "github_pat_TEST" + "x".repeat(40);
+process.env.EDITOR_GITHUB_TOKEN = "ghp_classic_token_not_allowed_xxxxxxxxxxxx";
+process.env.EDITOR_PASSWORD_HASH = "plaintext-password";
+process.env.EDITOR_SESSION_SECRET = "short";
+const { missingConfig } = await import("../lib/config.ts");
+const mc = missingConfig();
+ok(mc.length === 3 && mc.every((m) => !m.includes("ghp_") && !m.includes("plaintext")), "invalid token/hash/secret formats rejected; messages carry names only");
+ok((await masterRoute.GET(req("/api/master"))).status === 503, "classic token / plaintext password -> still fail closed");
+process.env.EDITOR_GITHUB_TOKEN = TEST_TOKEN;
+process.env.EDITOR_PASSWORD_HASH = `scrypt$16384$8$1$${salt.toString("base64url")}$${key.toString("base64url")}`;
 process.env.EDITOR_SESSION_SECRET = crypto.randomBytes(32).toString("hex");
-const sess = newSession("tangiblethinking");
+ok(missingConfig().length === 0, "valid config accepted");
+const sess = newSession();
 const ck = `${SESSION_COOKIE}=${encodeURIComponent(sess.value)}`;
 setFile("data/master.json", masterText);
 
 for (const [name, call] of [["master", () => masterRoute.GET(req("/api/master"))], ["status", () => statusRoute.GET(req("/api/status?commit=" + "a".repeat(40) + "&master_sha256=" + "b".repeat(64)))], ["save", () => saveRoute.POST(req("/api/save", { method: "POST", origin: O, body: {} }))], ["refresh preview", () => previewRoute.POST(req("/api/refresh/preview", { method: "POST", origin: O, body: {} }))], ["refresh apply", () => applyRoute.POST(req("/api/refresh/apply", { method: "POST", origin: O, body: {} }))]])
   ok((await call()).status === 401, `no session: ${name} -> 401`);
-const other = newSession("someone-else");
-ok((await masterRoute.GET(req("/api/master", { cookie: `${SESSION_COOKIE}=${encodeURIComponent(other.value)}` }))).status === 401, "non-allow-listed login -> 401");
+const forged = sign({ sub: "someone-else", csrf: "x", exp: Date.now() + 1e6 });
+ok((await masterRoute.GET(req("/api/master", { cookie: `${SESSION_COOKIE}=${encodeURIComponent(forged)}` }))).status === 401, "wrong session subject -> 401");
 ok((await masterRoute.GET(req("/api/master", { cookie: ck.slice(0, -3) + "AAA" }))).status === 401, "tampered session -> 401");
-const expired = sign({ login: "tangiblethinking", csrf: "x", exp: Date.now() - 1 });
+const expired = sign({ sub: "owner", csrf: "x", exp: Date.now() - 1 });
 ok((await masterRoute.GET(req("/api/master", { cookie: `${SESSION_COOKIE}=${encodeURIComponent(expired)}` }))).status === 401, "expired session -> 401");
 ok((await saveRoute.POST(req("/api/save", { method: "POST", cookie: ck, csrf: sess.session.csrf, body: {} }))).status === 403, "save without Origin -> 403");
 ok((await saveRoute.POST(req("/api/save", { method: "POST", cookie: ck, origin: "https://evil.example", csrf: sess.session.csrf, body: {} }))).status === 403, "save cross-origin -> 403");
@@ -98,7 +103,8 @@ ok(!calls.some((c) => c.m !== "GET"), "rejected requests made no GitHub writes")
 const mr = await masterRoute.GET(req("/api/master", { cookie: ck }));
 const mj = await mr.json();
 ok(mr.status === 200 && mj.sha === blobSha(masterText) && mj.master.records.length === 87 && mj.path === "tangiblethinking/portforag-test@main:data/master.json", "read: single master from the fixed repo/path with blob sha");
-ok(calls.some((c) => c.url.includes("/access_tokens") && JSON.parse(c.body).repositories[0] === "portforag-test" && JSON.parse(c.body).permissions.contents === "write" && JSON.parse(c.body).permissions.statuses === "read" && Object.keys(JSON.parse(c.body).permissions).length === 2), "installation token narrowed to the repo, contents:write + statuses:read only");
+ok(calls.filter((c) => c.url.startsWith("https://api.github.com")).every((c) => c.auth === `Bearer ${TEST_TOKEN}` && new URL(c.url).pathname.startsWith("/repos/tangiblethinking/portforag-test/")), "GitHub calls use the server token, only on tangiblethinking/portforag-test");
+ok(!JSON.stringify(mj).includes(TEST_TOKEN) && !JSON.stringify(mj).includes(process.env.EDITOR_PASSWORD_HASH), "responses never contain the token or password hash");
 
 // ---- edits ----
 {
@@ -161,26 +167,28 @@ ok(calls.some((c) => c.url.includes("/access_tokens") && JSON.parse(c.body).repo
   ok(j.index.state === "unknown", "status: unreachable version endpoint -> unknown");
 }
 
-// ---- sign-in ----
+// ---- password sign-in ----
 {
-  const lr = await loginRoute.GET(req("/api/auth/login"));
-  const loc = new URL(lr.headers.get("location"));
-  ok(lr.status === 302 && loc.host === "github.com" && loc.searchParams.get("redirect_uri") === `${O}/api/auth/callback` && loc.searchParams.get("code_challenge_method") === "S256" && loc.searchParams.get("state") && !loc.searchParams.get("scope"), "login: GitHub App user authorization with state + PKCE, no scopes");
-  const oc = lr.headers.get("set-cookie").split(";")[0];
-  const state = loc.searchParams.get("state");
-  let r = await cbRoute.GET(req(`/api/auth/callback?code=x&state=wrong`, { cookie: oc }));
-  ok(r.headers.get("location").endsWith("?auth=state") && !/pee_session=[^;]/.test(r.headers.get("set-cookie") || ""), "callback: bad state rejected");
-  r = await cbRoute.GET(req(`/api/auth/callback?code=x&state=${state}`));
-  ok(r.headers.get("location").endsWith("?auth=state"), "callback: missing state cookie rejected");
-  userLogin = "intruder";
-  r = await cbRoute.GET(req(`/api/auth/callback?code=x&state=${state}`, { cookie: oc }));
-  ok(r.headers.get("location").endsWith("?auth=forbidden") && !/pee_session=[^;]/.test(r.headers.get("set-cookie") || ""), "callback: non-allow-listed GitHub login gets no session");
-  userLogin = "tangiblethinking";
-  r = await cbRoute.GET(req(`/api/auth/callback?code=x&state=${state}`, { cookie: oc }));
-  const sc = r.headers.getSetCookie().find((c) => c.startsWith(SESSION_COOKIE + "="));
-  ok(sc && /HttpOnly/.test(sc) && /Secure/.test(sc) && /SameSite=Lax/.test(sc) && !/user-token-x/.test(sc), "callback: allow-listed login gets HttpOnly Secure session; user token not stored");
-  const ex = calls.find((c) => c.url.startsWith("https://github.com/login/oauth/access_token"));
-  ok(JSON.parse(ex.body).code_verifier, "code exchange sends the PKCE verifier");
+  const login = (form, opts = {}) => loginRoute.POST(req("/api/auth/login", { method: "POST", origin: O, form, ...opts }));
+  let r = await loginRoute.POST(req("/api/auth/login", { method: "POST", form: { password: TEST_PASSWORD } }));
+  ok(r.status === 403, "login without Origin -> 403");
+  r = await loginRoute.POST(req("/api/auth/login", { method: "POST", origin: "https://evil.example", form: { password: TEST_PASSWORD } }));
+  ok(r.status === 403, "cross-origin login -> 403");
+  r = await login({ password: "wrong password" }, { ip: "10.0.0.1" });
+  ok(r.status === 303 && r.headers.get("location").endsWith("?auth=failed") && !r.headers.get("set-cookie"), "wrong password -> no session");
+  r = await login({ password: TEST_PASSWORD }, { ip: "10.0.0.2" });
+  const sc = r.headers.get("set-cookie") || "";
+  ok(r.status === 303 && sc.startsWith(SESSION_COOKIE + "=") && /HttpOnly/.test(sc) && /Secure/.test(sc) && /SameSite=Lax/.test(sc) && !sc.includes(TEST_PASSWORD), "correct password -> HttpOnly Secure SameSite session");
+  const cookieVal = sc.split(";")[0];
+  ok((await masterRoute.GET(req("/api/master", { cookie: cookieVal }))).status === 200, "new session can read");
+  for (let i = 0; i < 5; i++) await login({ password: "nope" + i }, { ip: "10.0.0.3" });
+  r = await login({ password: TEST_PASSWORD }, { ip: "10.0.0.3" });
+  ok(r.headers.get("location").endsWith("?auth=locked") && !r.headers.get("set-cookie"), "5 failures lock that IP for 15 minutes");
+  ok((await loginRoute.GET()).status === 405, "login GET not allowed");
+  const logout = await import("../app/api/auth/logout/route.ts");
+  ok((await logout.POST(req("/api/auth/logout", { method: "POST", cookie: ck, origin: O, csrf: "bad" }))).status === 403, "logout needs CSRF");
+  const lo = await logout.POST(req("/api/auth/logout", { method: "POST", cookie: ck, origin: O, csrf: sess.session.csrf }));
+  ok(lo.status === 200 && /Max-Age=0/.test(lo.headers.get("set-cookie")), "logout clears the session cookie");
 }
 
 // ---- refresh: same core as the portfolio, byte-identical, preserves selections ----
@@ -213,7 +221,8 @@ ok(fs.readFileSync("lib/master-core.mjs", "utf8") === fs.readFileSync(path.join(
 ok(fs.readFileSync("lib/master-validate.mjs", "utf8") === fs.readFileSync(path.join(PORTFOLIO, "scripts/master-validate.mjs"), "utf8"), "lib/master-validate.mjs == portfolio scripts/master-validate.mjs");
 // ---- no secrets/credentials in client code ----
 const client = fs.readFileSync("components/Editor.tsx", "utf8");
-ok(!/process\.env|PRIVATE_KEY|CLIENT_SECRET|SESSION_SECRET/.test(client), "client component reads no secrets");
+ok(!/process\.env|GITHUB_TOKEN|PASSWORD_HASH|SESSION_SECRET/.test(client), "client component reads no secrets");
+ok(!fs.existsSync("github-app-manifest.json") && !fs.existsSync("app/api/auth/callback") && !/installation|appJwt|oauth/i.test(fs.readFileSync("lib/github.ts", "utf8")), "GitHub App / OAuth code removed");
 ok(!fs.readdirSync("app/api", { recursive: true }).some((f) => /demo|public/.test(String(f))), "no demo/public write endpoints");
 
 console.log(`editor tests: ${pass} passed, ${fail} failed`);

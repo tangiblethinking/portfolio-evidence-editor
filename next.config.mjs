@@ -5,7 +5,7 @@ const csp = [
   "img-src 'self' https://portforag-test.vercel.app data:",
   "connect-src 'self'",
   "frame-ancestors 'none'",
-  "form-action 'self' https://github.com",
+  "form-action 'self'",
   "base-uri 'none'",
 ].join("; ");
 export default {

@@ -1,10 +1,10 @@
 import { headers } from "next/headers";
 import Editor from "../components/Editor.tsx";
-import { ALLOWED_LOGINS, REQUIRED_ENV, missingConfig } from "../lib/config.ts";
+import { REQUIRED_ENV, missingConfig } from "../lib/config.ts";
 import { getSession } from "../lib/session.ts";
 export const dynamic = "force-dynamic";
 
-const MSG: Record<string, string> = { state: "Sign-in expired or was tampered with. Try again.", failed: "GitHub sign-in failed.", forbidden: "That GitHub account is not allowed to use this editor." };
+const MSG: Record<string, string> = { failed: "Incorrect password.", locked: "Too many attempts. Try again in 15 minutes." };
 
 export default async function Page({ searchParams }: { searchParams: Promise<{ auth?: string }> }) {
   const missing = missingConfig();
@@ -25,11 +25,14 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ a
     return (
       <main className="login">
         <h1>Portfolio evidence editor</h1>
-        <p className="muted">Private editor for the portfolio master collection. Sign in with GitHub ({ALLOWED_LOGINS.join(", ")} only).</p>
+        <p className="muted">Private editor for the portfolio master collection.</p>
         {auth && MSG[auth] && <p className="err">{MSG[auth]}</p>}
-        <p><a className="btn primary" href="/api/auth/login">Sign in with GitHub</a></p>
+        <form method="post" action="/api/auth/login" style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+          <input type="password" name="password" aria-label="Password" autoComplete="current-password" required autoFocus />
+          <button className="btn primary" type="submit">Sign in</button>
+        </form>
       </main>
     );
   }
-  return <Editor login={session.login} csrf={session.csrf} />;
+  return <Editor csrf={session.csrf} />;
 }

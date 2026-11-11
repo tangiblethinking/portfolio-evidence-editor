@@ -21,26 +21,25 @@ The editor keeps no copy: every read fetches that file server-side, every save c
   No schedule or automatic source fetching exists; define permitted sources/frequency before adding any.
 
 ## Security model
-- Sign-in: GitHub App **user authorization** (OAuth web flow) with signed state + PKCE; only `/user` is read to get the
-  login; the user token is discarded. Allow-list: `tangiblethinking` (`lib/config.ts`).
+- Sign-in: single owner password. Only its scrypt hash is configured (`EDITOR_PASSWORD_HASH`); login is a same-origin
+  form POST, constant-time verified, throttled (5 failures per IP per 15 min, per instance).
 - Session: stateless HMAC-signed cookie (`__Host-`, HttpOnly, Secure, SameSite=Lax, 8 h) carrying a CSRF token.
-- Every API route calls `authorize()`: 503 if unconfigured, 401 without a valid allow-listed session; state-changing
-  routes also require same-origin `Origin` and `x-csrf-token`.
-- Repo access: GitHub App installation token, requested per use narrowed to `portforag-test` with `contents:write` and
-  `statuses:read`. The private key lives only in server env. Fails closed (login page shows "not configured") until all
-  settings exist. Headers: CSP (frame-ancestors none), X-Frame-Options DENY, noindex, no-referrer, HSTS.
+- Every API route calls `authorize()`: 503 if unconfigured, 401 without a valid session; state-changing routes also
+  require same-origin `Origin` and `x-csrf-token`.
+- Repo access: server-only fine-grained personal access token (`EDITOR_GITHUB_TOKEN`, must start `github_pat_`), used only
+  for `tangiblethinking/portforag-test` (paths fixed in code). Never sent to the browser or logged. Fails closed (login page
+  shows "not configured") until all settings are valid. Headers: CSP (frame-ancestors none), X-Frame-Options DENY,
+  noindex, no-referrer, HSTS.
 
 ## Setup (owner)
-1. Create the GitHub App from `github-app-manifest.json` (GitHub → Settings → Developer settings → GitHub Apps → New,
-   or the manifest flow). Private, no webhooks, permissions: Repository **Contents: Read & write**, **Commit statuses:
-   Read-only** (Metadata: read is implicit). Callback URL: `https://<editor-domain>/api/auth/callback`.
-2. Install it on `tangiblethinking` → **Only select repositories** → `portforag-test`.
-3. Generate a client secret and a private key.
-4. In the Vercel project (Production) set: `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
-   `GITHUB_APP_PRIVATE_KEY` (PEM; `\n` escapes accepted), `EDITOR_SESSION_SECRET` (random, ≥ 32 chars).
-5. Redeploy; sign in at `https://<editor-domain>/`.
+1. Create a fine-grained PAT: Resource owner `tangiblethinking` → Only select repositories → `portforag-test` →
+   Repository permissions **Contents: Read and write**, **Commit statuses: Read-only** (Metadata read is automatic).
+2. Make the password hash locally: `node scripts/hash-password.mjs` (input hidden; prints `scrypt$32768$8$1$<salt>$<key>`).
+3. In the Vercel project (Production) add as **Sensitive**: `EDITOR_GITHUB_TOKEN`, `EDITOR_PASSWORD_HASH`,
+   `EDITOR_SESSION_SECRET` (random, ≥ 32 chars).
+4. Redeploy; sign in at `https://portfolio-evidence-editor.vercel.app/`.
 
-Public paths: `/` (login or "not configured" page), `/api/auth/login`, `/api/auth/callback`. Everything else requires a session.
+Public paths: `/` (login or "not configured" page) and `POST /api/auth/login`. Everything else requires a session.
 
 ## Dev
 `npm test` (mocked network: auth, CSRF, conflicts, exact file, refresh identity) · `npm run typecheck` · `npm run build`.
